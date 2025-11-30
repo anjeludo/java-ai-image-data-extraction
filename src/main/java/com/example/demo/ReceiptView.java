@@ -1,7 +1,9 @@
 package com.example.demo;
 
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.grid.Grid;
+import com.vaadin.flow.component.html.Div;
 import com.vaadin.flow.component.html.H3;
 import com.vaadin.flow.component.html.Image;
 import com.vaadin.flow.component.html.Paragraph;
@@ -17,6 +19,8 @@ import org.springframework.util.MimeTypeUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Route("")
 public class ReceiptView extends HorizontalLayout {
@@ -27,6 +31,8 @@ public class ReceiptView extends HorizontalLayout {
     private final VerticalLayout resultsLayout;
     private final Image imagePreview;
     private final Button analyzeButton;
+    private final Div timerDisplay;
+    private final AtomicBoolean timerRunning = new AtomicBoolean(false);
 
     public ReceiptView(ChatClient.Builder builder) {
         this.client = builder.build();
@@ -46,6 +52,23 @@ public class ReceiptView extends HorizontalLayout {
 
         analyzeButton = new Button("Analyze");
         analyzeButton.setEnabled(false);
+
+        // Create custom timer display
+        timerDisplay = new Div();
+        timerDisplay.setText("00:00.00");
+        timerDisplay.setVisible(false);
+        timerDisplay.getStyle()
+                .set("position", "fixed")
+                .set("top", "20px")
+                .set("right", "20px")
+                .set("background-color", "yellow")
+                .set("color", "white")
+                .set("padding", "15px 30px")
+                .set("border-radius", "8px")
+                .set("font-weight", "bold")
+                .set("font-size", "20px")
+                .set("box-shadow", "0 4px 6px rgba(0,0,0,0.3)")
+                .set("z-index", "9999");
 
         // Left side: Controls
         VerticalLayout controlsLayout = new VerticalLayout();
@@ -95,29 +118,76 @@ public class ReceiptView extends HorizontalLayout {
 
         rightLayout.add(imagePreview, resultsLayout);
 
-        add(controlsLayout, rightLayout);
+        add(controlsLayout, rightLayout, timerDisplay);
     }
 
     private void analyzeImage() {
         if (imageBytes == null)
             return;
 
-        try {
-            var receipt = client.prompt()
-                    .user(userMessage -> userMessage
-                            .text("""
-                                    Please read the attached receipt and return the value in provided format
-                                    """)
-                            .media(
-                                    MimeTypeUtils.parseMimeType(mimeType),
-                                    new ByteArrayResource(imageBytes)))
-                    .call()
-                    .entity(Receipt.class);
-            showReceipt(receipt);
-        } catch (Exception ex) {
-            ex.printStackTrace();
-            resultsLayout.add(new Paragraph("Error analyzing image: " + ex.getMessage()));
-        }
+        // Disable button and show timer
+        analyzeButton.setEnabled(false);
+        timerDisplay.setVisible(true);
+        timerDisplay.setText("00:00.00");
+        timerRunning.set(true);
+
+        // Store UI instance
+        UI ui = UI.getCurrent();
+
+        // Start timer update thread
+        CompletableFuture.runAsync(() -> {
+            long startTime = System.currentTimeMillis();
+            while (timerRunning.get()) {
+                long elapsed = System.currentTimeMillis() - startTime;
+                long seconds = elapsed / 1000;
+                long centiseconds = (elapsed % 1000) / 10;
+                String timeText = String.format("%02d:%02d.%02d", seconds / 60, seconds % 60, centiseconds);
+
+                ui.access(() -> {
+                    timerDisplay.setText(timeText);
+                    ui.push();
+                });
+
+                try {
+                    Thread.sleep(50); // Update every 50ms
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+
+        // Run AI analysis in background
+        CompletableFuture.runAsync(() -> {
+            try {
+                var receipt = client.prompt()
+                        .user(userMessage -> userMessage
+                                .text("""
+                                        Please read the attached receipt and return the value in provided format
+                                        """)
+                                .media(
+                                        MimeTypeUtils.parseMimeType(mimeType),
+                                        new ByteArrayResource(imageBytes)))
+                        .call()
+                        .entity(Receipt.class);
+
+                ui.access(() -> {
+                    showReceipt(receipt);
+                    stopTimer();
+                });
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                ui.access(() -> {
+                    resultsLayout.add(new Paragraph("Error analyzing image: " + ex.getMessage()));
+                    stopTimer();
+                });
+            }
+        });
+    }
+
+    private void stopTimer() {
+        timerRunning.set(false);
+        timerDisplay.setVisible(false);
+        analyzeButton.setEnabled(true);
     }
 
     private void showReceipt(Receipt receipt) {
